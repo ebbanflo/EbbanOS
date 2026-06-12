@@ -222,7 +222,7 @@ header{
   transform:translateY(105%);
   max-height:88dvh;overflow-y:auto;will-change:transform;
 }
-#sheet.anim{transition:transform .28s cubic-bezier(.3,.9,.3,1)}
+#sheet.anim{transition:transform .34s cubic-bezier(.2,.9,.25,1.1)}
 #sheet.open{transform:translateY(0)}
 #grabZone{padding:14px 0 10px;touch-action:none}
 .grab{width:38px;height:4px;border-radius:99px;background:#3a3a3a;margin:0 auto}
@@ -278,6 +278,75 @@ header{
 }
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 :focus-visible{outline:2px solid var(--accent,var(--inbox));outline-offset:2px}
+
+/* ---------- action sheet ---------- */
+#asOverlay{
+  position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:70;
+  opacity:0;pointer-events:none;transition:opacity .22s;
+}
+#asOverlay.open{opacity:1;pointer-events:auto}
+#actionSheet{
+  position:fixed;left:8px;right:8px;bottom:calc(8px + env(safe-area-inset-bottom));
+  z-index:80;display:flex;flex-direction:column;gap:8px;
+  transform:translateY(140%);will-change:transform;
+  transition:transform .34s cubic-bezier(.2,.9,.25,1.1);
+}
+#actionSheet.open{transform:translateY(0)}
+#asGroup{
+  background:rgba(30,30,30,.86);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);
+  border:1px solid var(--border);border-radius:15px;overflow:hidden;
+}
+#asTitle{
+  font-family:var(--mono);font-size:11.5px;color:var(--muted);text-align:center;
+  padding:14px 16px 12px;line-height:1.5;border-bottom:1px solid var(--border);
+}
+#asTitle:empty{display:none}
+#asBtns button{
+  width:100%;padding:15px 0;font-size:16px;color:var(--accent,var(--inbox));
+  border-bottom:1px solid var(--border);
+}
+#asBtns button:last-child{border-bottom:none}
+#asBtns button:active{background:var(--surface-2)}
+#asBtns button.danger{color:var(--danger)}
+#asCancel{
+  background:rgba(30,30,30,.86);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);
+  border:1px solid var(--border);border-radius:15px;
+  padding:15px 0;font-size:16px;font-weight:600;color:var(--text);
+}
+#asCancel:active{background:var(--surface-2)}
+
+/* ---------- pull-to-refresh ---------- */
+#ptr{
+  position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 4px);
+  transform:translateX(-50%) scale(.6);transform-origin:center;
+  width:30px;height:30px;z-index:15;opacity:0;pointer-events:none;
+}
+.ptr-spin{
+  display:block;width:24px;height:24px;border-radius:99px;
+  border:2px solid var(--border);border-top-color:var(--accent,var(--inbox));
+}
+#ptr.spin .ptr-spin{animation:ptrSpin .7s linear infinite}
+@keyframes ptrSpin{to{transform:rotate(360deg)}}
+
+/* ---------- card mount + list swap ---------- */
+@keyframes cardIn{from{opacity:0;transform:translateY(9px)}to{opacity:1;transform:none}}
+/* only animate-in on deliberate swaps (tab/view), not on every search/filter render */
+#list.anim-in .card-wrap{animation:cardIn .28s cubic-bezier(.2,.9,.25,1.1) both}
+#list.anim-in .card-wrap:nth-child(1){animation-delay:0ms}
+#list.anim-in .card-wrap:nth-child(2){animation-delay:24ms}
+#list.anim-in .card-wrap:nth-child(3){animation-delay:48ms}
+#list.anim-in .card-wrap:nth-child(4){animation-delay:72ms}
+#list.anim-in .card-wrap:nth-child(5){animation-delay:96ms}
+#list.anim-in .card-wrap:nth-child(n+6){animation-delay:120ms}
+#list.swap-out{transition:transform .16s ease,opacity .16s ease}
+
+/* iOS haptic switch must be rendered (not display:none) to fire */
+#hapticLabel{position:fixed;left:-9999px;width:0;height:0;opacity:0;pointer-events:none}
+
+@media (prefers-reduced-motion: reduce){
+  #list.anim-in .card-wrap{animation:none}
+  #ptr.spin .ptr-spin{animation:none}
+}
 </style>
 </head>
 <body>
@@ -285,7 +354,9 @@ header{
   <header>
     <div id="path">~/inbox</div>
     <button id="viewBtn" class="hbtn" aria-label="Toggle calendar view">▦ cal</button>
+    <button id="importBtn" class="hbtn" aria-label="Import backup">import ↘</button>
     <button id="exportBtn" class="hbtn" aria-label="Export backup">export ↗</button>
+    <input id="importFile" type="file" accept="application/json,.json" hidden>
   </header>
 
   <div id="searchWrap">
@@ -348,6 +419,22 @@ header{
 
 <div id="toast"></div>
 
+<!-- iOS-style action sheet -->
+<div id="asOverlay"></div>
+<div id="actionSheet" role="dialog" aria-modal="true">
+  <div id="asGroup">
+    <div id="asTitle"></div>
+    <div id="asBtns"></div>
+  </div>
+  <button id="asCancel">cancel</button>
+</div>
+
+<!-- pull-to-refresh indicator -->
+<div id="ptr"><span class="ptr-spin"></span></div>
+
+<!-- hidden switch: triggers the system haptic on iOS 17.4+ -->
+<label id="hapticLabel" aria-hidden="true"><input type="checkbox" switch id="hapticSwitch"></label>
+
 <script>
 'use strict';
 
@@ -358,6 +445,8 @@ const AREAS = {
   music:   {label:'music',    color:'#4CAF7D'},
 };
 const AREA_KEYS = Object.keys(AREAS);
+const TAB_ORDER = ['inbox', ...AREA_KEYS];   // left→right order for swipe-between-tabs
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /* ============ tiny utils ============ */
 const $  = s => document.querySelector(s);
@@ -379,6 +468,44 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g,
 function toast(msg){
   const t = $('#toast'); t.textContent = msg; t.classList.add('show');
   clearTimeout(toast._h); toast._h = setTimeout(()=>t.classList.remove('show'), 1700);
+}
+
+/* ============ haptics ============ */
+/* iOS Safari ignores navigator.vibrate; toggling a rendered <input switch>
+   fires the system haptic on iOS 17.4+. Fall back to vibrate for Android. */
+const VIBE = {tap:8, bump:[6], commit:[12], heavy:[18]};
+function haptic(kind='tap'){
+  const sw = $('#hapticSwitch');
+  if(sw){ try{ sw.checked = !sw.checked; }catch(e){} }
+  if(navigator.vibrate){ try{ navigator.vibrate(VIBE[kind] || VIBE.tap); }catch(e){} }
+}
+
+/* ============ iOS-style action sheet ============ */
+/* actions: [{label, style?, value}] — resolves to the picked value, or null on cancel */
+function actionSheet(title, actions){
+  return new Promise(res=>{
+    const ov = $('#asOverlay'), sheet = $('#actionSheet');
+    $('#asTitle').textContent = title || '';
+    const wrap = $('#asBtns'); wrap.innerHTML = '';
+    let done = false;
+    const close = val => {
+      if(done) return; done = true;
+      ov.classList.remove('open'); sheet.classList.remove('open');
+      setTimeout(()=>res(val), 240);
+    };
+    actions.forEach(a=>{
+      const b = document.createElement('button');
+      b.textContent = a.label;
+      if(a.style==='danger') b.className = 'danger';
+      b.addEventListener('click', ()=>{ haptic('tap'); close(a.value); });
+      wrap.appendChild(b);
+    });
+    ov.onclick = ()=>{ haptic('tap'); close(null); };
+    $('#asCancel').onclick = ()=>{ haptic('tap'); close(null); };
+    ov.classList.add('open');
+    requestAnimationFrame(()=>sheet.classList.add('open'));
+    haptic('bump');
+  });
 }
 
 /* ============ IndexedDB ============ */
@@ -408,6 +535,11 @@ const dbDel = (store,id) => new Promise((res,rej)=>{
 const dbGetAll = store => new Promise((res,rej)=>{
   const r = db.transaction(store).objectStore(store).getAll();
   r.onsuccess = ()=>res(r.result); r.onerror = ()=>rej(r.error);
+});
+const dbClear = store => new Promise((res,rej)=>{
+  const tx = db.transaction(store,'readwrite');
+  tx.objectStore(store).clear();
+  tx.oncomplete = ()=>res(); tx.onerror = ()=>rej(tx.error);
 });
 
 /* ============ state ============ */
@@ -459,6 +591,46 @@ $('#exportBtn').addEventListener('click', async ()=>{
     tasks:cache.tasks, notes:cache.notes, events:cache.events
   }, null, 2);
   shareFile(json, `second-brain-backup-${todayKey()}.json`, 'application/json');
+});
+
+/* ============ import / restore ============ */
+const STORES = ['tasks','notes','events'];
+$('#importBtn').addEventListener('click', ()=>{ haptic('tap'); $('#importFile').click(); });
+$('#importFile').addEventListener('change', async e=>{
+  const file = e.target.files[0];
+  e.target.value = '';                          // reset so the same file re-fires
+  if(!file) return;
+  let data;
+  try{ data = JSON.parse(await file.text()); }
+  catch(_){ toast('invalid backup file'); return; }
+  if(!data || typeof data !== 'object'){ toast('invalid backup file'); return; }
+
+  // normalize: keep only well-formed items (must have an id)
+  const incoming = {};
+  let total = 0;
+  for(const s of STORES){
+    incoming[s] = Array.isArray(data[s]) ? data[s].filter(x => x && x.id) : [];
+    total += incoming[s].length;
+  }
+  if(!total){ toast('no items in file'); return; }
+
+  const summary = STORES
+    .map(s => `${incoming[s].length} ${s}`).filter(p => !p.startsWith('0 ')).join(' · ');
+  const mode = await actionSheet(`import ${summary}?`, [
+    {label:'merge with current', value:'merge'},
+    {label:'replace everything', style:'danger', value:'replace'},
+  ]);
+  if(!mode) return;
+  if(mode==='replace' && !confirm('Replace ALL current data with this backup? This cannot be undone.'))
+    return;
+
+  if(mode==='replace') await Promise.all(STORES.map(dbClear));
+  for(const s of STORES)
+    await Promise.all(incoming[s].map(item => dbPut(s, item)));
+
+  await refreshCache(); render();
+  haptic('commit');
+  toast(mode==='replace' ? 'restored' : 'imported');
 });
 
 /* ============ shared actions ============ */
@@ -639,10 +811,16 @@ function attachSwipe(){
     const type = wrap.dataset.type, id = wrap.dataset.id;
     const rightW = wrap.querySelectorAll('.swipe-r button').length * 76;
     const hasLeft = !!wrap.querySelector('.swipe-l');
-    let sx=0, sy=0, pos=0, base=0, horiz=null, active=false;
+    let sx=0, sy=0, pos=0, base=0, horiz=null, active=false, armed=false;
+    // damped rubber-band: free travel up to `lo`, then resistance beyond it
+    const band = (v, lo, hi) => {
+      if(v > hi) return hi + (v - hi) * 0.3;
+      if(v < lo) return lo + (v - lo) * 0.3;
+      return v;
+    };
 
     wrap.addEventListener('pointerdown', e=>{
-      sx=e.clientX; sy=e.clientY; base=pos; horiz=null; active=true;
+      sx=e.clientX; sy=e.clientY; base=pos; horiz=null; active=true; armed=false;
       card.classList.remove('snap');
     });
     wrap.addEventListener('pointermove', e=>{
@@ -650,9 +828,11 @@ function attachSwipe(){
       const mx=e.clientX-sx, my=e.clientY-sy;
       if(horiz===null && (Math.abs(mx)>7||Math.abs(my)>7)) horiz = Math.abs(mx)>Math.abs(my);
       if(!horiz) return;
-      let v = base + mx;
-      const maxR = hasLeft ? 110 : 0;
-      v = Math.max(-(rightW+40), Math.min(maxR, v));
+      const maxR = hasLeft ? 95 : 0;
+      const v = band(base + mx, -rightW, maxR);
+      // light haptic the moment a full-swipe action arms / disarms
+      const nowArmed = v < -(rightW + 24) || (hasLeft && v > 95);
+      if(nowArmed !== armed){ armed = nowArmed; if(armed) haptic('bump'); }
       pos = v;
       card.style.transform = `translateX(${v}px)`;
       e.preventDefault();
@@ -662,11 +842,11 @@ function attachSwipe(){
       active=false; card.classList.add('snap');
       if(pos < -(rightW + 24)){                    // full left swipe → delete
         card.style.transform='translateX(0)'; pos=0;
-        await deleteItem(type,id); return;
+        haptic('commit'); await deleteItem(type,id); return;
       }
       if(hasLeft && pos > 95){                     // full right swipe → archive/restore
         card.style.transform='translateX(0)'; pos=0;
-        await toggleArchive(id); return;
+        haptic('commit'); await toggleArchive(id); return;
       }
       pos = pos < -rightW/2 ? -rightW : (hasLeft && pos > 45 ? 76 : 0);
       card.style.transform = `translateX(${pos}px)`;
@@ -761,6 +941,7 @@ const isoToLocal = iso => {
 function openSheet(){
   $('#sheet').classList.add('anim');
   $('#overlay').classList.add('open'); $('#sheet').classList.add('open');
+  haptic('bump');
 }
 function closeSheet(){
   $('#sheet').classList.add('anim');
@@ -862,11 +1043,11 @@ $('#icsBtn').addEventListener('click', ()=>{
 
 $('#saveBtn').addEventListener('click', async ()=>{
   const title=$('#fTitle').value.trim();
-  if(!title){ $('#fTitle').focus(); toast('title required'); return; }
+  if(!title){ $('#fTitle').focus(); haptic('heavy'); toast('title required'); return; }
   const t=state.captureType, area=state.captureArea, now=new Date().toISOString();
 
   if(t==='event'){
-    if(!$('#fStart').value){ $('#fStart').focus(); toast('start time required'); return; }
+    if(!$('#fStart').value){ $('#fStart').focus(); haptic('heavy'); toast('start time required'); return; }
     if(!$('#fEnd').value){
       const d=new Date($('#fStart').value); d.setHours(d.getHours()+1);
       $('#fEnd').value=isoToLocal(d.toISOString());
@@ -883,7 +1064,7 @@ $('#saveBtn').addEventListener('click', async ()=>{
       it.endDate=new Date($('#fEnd').value).toISOString();
     }
     await dbPut(state.editing.store,it);
-    await refreshCache(); render(); closeSheet(); toast('updated');
+    await refreshCache(); render(); closeSheet(); haptic('commit'); toast('updated');
     return;
   }
 
@@ -892,35 +1073,113 @@ $('#saveBtn').addEventListener('click', async ()=>{
       dueDate:$('#fDue').value?new Date($('#fDue').value).toISOString():null,
       status:'active',createdAt:now};
     await dbPut('tasks',task);
-    await refreshCache(); render(); closeSheet(); toast('saved → reminders');
+    await refreshCache(); render(); closeSheet(); haptic('commit'); toast('saved → reminders');
     handoffReminder(task);
   } else if(t==='note'){
     await dbPut('notes',{id:uuid(),title,body:$('#fBody').value,area,
       isDaily:false,date:null,createdAt:now});
-    await refreshCache(); render(); closeSheet(); toast('saved');
+    await refreshCache(); render(); closeSheet(); haptic('commit'); toast('saved');
   } else {
     const ev={id:uuid(),title,area,
       startDate:new Date($('#fStart').value).toISOString(),
       endDate:new Date($('#fEnd').value).toISOString(),createdAt:now};
     await dbPut('events',ev);
-    await refreshCache(); render(); closeSheet(); toast('saved → calendar');
+    await refreshCache(); render(); closeSheet(); haptic('commit'); toast('saved → calendar');
     shareFile(generateICS(ev), title.replace(/\W+/g,'-').toLowerCase()+'.ics','text/calendar');
   }
 });
 
 /* ============ top-level controls ============ */
-$$('#tabs button').forEach(b=>b.addEventListener('click', ()=>{
-  state.tab=b.dataset.tab; state.showArchived=false;
+/* render() but flagged so cards stagger-in — for deliberate swaps (tabs, view toggle) */
+function renderSwap(){
+  const list=$('#list');
+  list.classList.remove('swap-out');
+  list.style.transition=''; list.style.transform=''; list.style.opacity='';
+  list.classList.add('anim-in');
   render();
-  $('#list').scrollTop=0;
-}));
+  list.scrollTop=0;
+  clearTimeout(renderSwap._h);
+  renderSwap._h=setTimeout(()=>list.classList.remove('anim-in'), 480);
+}
+function switchTab(name){
+  if(name===state.tab || !TAB_ORDER.includes(name)) return;
+  state.tab=name; state.showArchived=false;
+  renderSwap();
+  haptic('bump');
+}
+$$('#tabs button').forEach(b=>b.addEventListener('click', ()=> switchTab(b.dataset.tab)));
+
+/* ============ list-level gestures: swipe-between-tabs + pull-to-refresh ============ */
+/* Single arbiter on #list. Horizontal off a card → switch tabs; vertical-down at the
+   top → pull-to-refresh. Per-card swipe (attachSwipe) keeps its own horizontal gesture
+   because we bail to mode 'no' when the drag starts on a .card-wrap. */
+(function(){
+  const list=$('#list'), ptr=$('#ptr');
+  const PULL_MAX=90, PULL_TRIG=60, TAB_TRIG=58;
+  let sx=0, sy=0, mode=null, active=false, onCard=false, startTop=0, refreshing=false;
+
+  list.addEventListener('pointerdown', e=>{
+    if(refreshing) return;
+    sx=e.clientX; sy=e.clientY; mode=null; active=true;
+    startTop=list.scrollTop; onCard=!!e.target.closest('.card-wrap');
+  });
+  list.addEventListener('pointermove', e=>{
+    if(!active) return;
+    const mx=e.clientX-sx, my=e.clientY-sy;
+    if(mode===null){
+      if(Math.abs(mx)<8 && Math.abs(my)<8) return;
+      if(Math.abs(mx)>Math.abs(my)) mode=(onCard || state.view==='cal') ? 'no' : 'tab';
+      else mode=(my>0 && startTop<=0) ? 'pull' : 'no';
+    }
+    if(mode==='tab'){
+      list.style.transition='none';
+      list.style.transform=`translateX(${mx*0.5}px)`;
+      list.style.opacity=String(Math.max(.55, 1-Math.abs(mx)/520));
+      e.preventDefault();
+    } else if(mode==='pull'){
+      const d=Math.min(PULL_MAX, my*0.5);
+      ptr.style.transition='none';
+      ptr.style.opacity=String(Math.min(1, d/PULL_TRIG));
+      ptr.style.transform=`translateX(-50%) translateY(${d}px) scale(${0.6+Math.min(.4,d/PULL_MAX*0.4)})`;
+      e.preventDefault();
+    }
+  });
+  const end = async e=>{
+    if(!active) return; active=false;
+    const mx=(e.clientX||sx)-sx, my=(e.clientY||sy)-sy;
+    if(mode==='tab'){
+      list.classList.add('swap-out');
+      list.style.transition=''; list.style.transform=''; list.style.opacity='';
+      if(Math.abs(mx)>TAB_TRIG){
+        const i=TAB_ORDER.indexOf(state.tab), ni=mx<0 ? i+1 : i-1;
+        if(ni>=0 && ni<TAB_ORDER.length) switchTab(TAB_ORDER[ni]);
+      }
+    } else if(mode==='pull'){
+      ptr.style.transition='';
+      if(my*0.5>=PULL_TRIG && !refreshing){
+        refreshing=true; haptic('commit');
+        ptr.classList.add('spin');
+        ptr.style.opacity='1';
+        ptr.style.transform='translateX(-50%) translateY(40px) scale(1)';
+        await refreshCache(); render();
+        ptr.classList.remove('spin');
+        ptr.style.opacity=''; ptr.style.transform='';
+        refreshing=false;
+      } else { ptr.style.opacity=''; ptr.style.transform=''; }
+    }
+    mode=null;
+  };
+  list.addEventListener('pointerup', end);
+  list.addEventListener('pointercancel', end);
+})();
 $$('.chip').forEach(c=>c.addEventListener('click',()=>{state.filter=c.dataset.f;render();}));
 $('#archToggle').addEventListener('click',()=>{state.showArchived=!state.showArchived;render();});
 $('#search').addEventListener('input',e=>{state.search=e.target.value;render();});
 $('#viewBtn').addEventListener('click',()=>{
   state.view = state.view==='cal' ? 'list' : 'cal';
   if(state.view==='cal'){ state.calMonth=new Date(); state.selDay=todayKey(); }
-  render();
+  haptic('tap');
+  renderSwap();
 });
 
 /* ============ service worker (optional sw.js alongside this file) ============ */
